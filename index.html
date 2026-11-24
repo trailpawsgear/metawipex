@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MetaWipeX — Strip hidden data from your photos before you share them</title>
+<meta name="description" content="Your photos can carry GPS location, device model and timestamps nobody told you about. Drop them here, get clean copies back, nothing ever leaves your browser.">
+<link rel="canonical" href="https://metawipex.com/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="MetaWipeX">
+<meta property="og:url" content="https://metawipex.com/">
+<meta property="og:title" content="MetaWipeX — Strip hidden data from your photos before you share them">
+<meta property="og:description" content="Your photos can carry GPS location, device model and timestamps nobody told you about. Drop them here, get clean copies back, nothing ever leaves your browser.">
+<meta property="og:image" content="https://metawipex.com/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="MetaWipeX — Strip hidden data from your photos before you share them">
+<meta name="twitter:description" content="Your photos can carry GPS location, device model and timestamps nobody told you about. Drop them here, get clean copies back, nothing ever leaves your browser.">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha512-AMDnQCgqPTDjkeG+a4NwD6pGbhcgx6+6k0UKRSX0qgAIi+xcybN1lc2tC57vbtWyMcPiWFZBW97IENNdNznosg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#12151c; --panel2:#171b24; --text:#f2f3f5; --muted:#9aa3b2;
+    --accent:#3ddc97; --border:#232836;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+  .wrap{max-width:760px;margin:0 auto;padding:32px 16px 80px}
+  header{text-align:center;margin-bottom:24px}
+  h1{font-size:1.6rem;margin:0 0 6px}
+  header p{color:var(--muted);margin:0;font-size:.95rem;max-width:520px;margin:0 auto}
+  .drop{border:2px dashed var(--border);border-radius:16px;padding:48px 20px;text-align:center;margin:24px 0;cursor:pointer;transition:border-color .15s}
+  .drop.drag{border-color:var(--accent)}
+  .drop p{color:var(--muted);margin:8px 0 0}
+  .drop strong{color:var(--text)}
+  input[type=file]{display:none}
+  .file-list{margin-top:20px}
+  .file-row{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:10px;display:flex;align-items:center;gap:12px}
+  .file-row .thumb{width:44px;height:44px;border-radius:8px;object-fit:cover;background:var(--panel2);flex:none}
+  .file-row .info{flex:1;min-width:0}
+  .file-row .name{font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .file-row .found{font-size:.78rem;color:var(--accent)}
+  .file-row .found.none{color:var(--muted)}
+  .actions{display:flex;gap:10px;margin-top:20px;justify-content:center}
+  button{font:inherit;cursor:pointer;border:none;border-radius:10px;padding:12px 22px;font-weight:600;font-size:.95rem;background:var(--accent);color:#06241a}
+  button:disabled{opacity:.4;cursor:default}
+  footer{text-align:center;color:var(--muted);font-size:.8rem;margin-top:30px}
+  footer a{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>MetaWipeX</h1>
+    <p>Photos carry more than the picture. GPS coordinates, the exact time, the device that took it. Drop images here, every file is cleaned and re-encoded right here in your browser, nothing is ever uploaded anywhere.</p>
+  </header>
+
+  <div class="drop" id="dropZone">
+    <p><strong>Drop photos here</strong> or click to choose files</p>
+    <p>JPEG and PNG, processed one by one, as many as you like</p>
+    <input type="file" id="fileInput" accept="image/jpeg,image/png" multiple>
+  </div>
+
+  <div class="file-list" id="fileList"></div>
+
+  <div class="actions">
+    <button id="downloadBtn" disabled>Download cleaned photos (.zip)</button>
+  </div>
+
+  <footer>
+    Processing happens entirely on your device using your browser's own image engine. No file is ever sent to a server.
+    <br><a href="https://metawipex.com">metawipex.com</a>
+  </footer>
+</div>
+
+<script>
+(function(){
+  const dropZone = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+  const fileList = document.getElementById('fileList');
+  const downloadBtn = document.getElementById('downloadBtn');
+
+  let cleaned = []; // {name, blob}
+
+  dropZone.addEventListener('click', ()=> fileInput.click());
+  dropZone.addEventListener('dragover', e=>{ e.preventDefault(); dropZone.classList.add('drag'); });
+  dropZone.addEventListener('dragleave', ()=> dropZone.classList.remove('drag'));
+  dropZone.addEventListener('drop', e=>{
+    e.preventDefault();
+    dropZone.classList.remove('drag');
+    handleFiles(e.dataTransfer.files);
+  });
+  fileInput.addEventListener('change', e=> handleFiles(e.target.files));
+
+  // Minimal EXIF presence sniff: looks for the APP1/Exif marker in a JPEG's first bytes.
+  function hasExifMarker(arrayBuffer){
+    const view = new DataView(arrayBuffer);
+    if (view.getUint16(0) !== 0xFFD8) return false; // not a JPEG
+    let offset = 2;
+    while (offset < view.byteLength - 2) {
+      const marker = view.getUint16(offset);
+      if (marker === 0xFFE1) return true; // APP1, where EXIF lives
+      if ((marker & 0xFF00) !== 0xFF00) break;
+      const size = view.getUint16(offset + 2);
+      offset += 2 + size;
+    }
+    return false;
+  }
+
+  function cleanImage(file){
+    return new Promise((resolve, reject)=>{
+      const reader = new FileReader();
+      reader.onload = (e)=>{
+        const buf = e.target.result;
+        const hadExif = hasExifMarker(buf);
+        const blobUrl = URL.createObjectURL(new Blob([buf]));
+        const img = new Image();
+        img.onload = ()=>{
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          URL.revokeObjectURL(blobUrl);
+          const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+          canvas.toBlob((blob)=>{
+            resolve({ name: file.name, blob, hadExif, thumb: canvas.toDataURL('image/jpeg', 0.5) });
+          }, mime, 0.92);
+        };
+        img.onerror = reject;
+        img.src = blobUrl;
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  async function handleFiles(fileArray){
+    const files = [...fileArray].filter(f=> f.type === 'image/jpeg' || f.type === 'image/png');
+    for (const file of files){
+      const row = document.createElement('div');
+      row.className = 'file-row';
+      row.innerHTML = `<div class="info"><div class="name">${file.name}</div><div class="found">Checking…</div></div>`;
+      fileList.appendChild(row);
+      try {
+        const result = await cleanImage(file);
+        cleaned.push(result);
+        const thumb = document.createElement('img');
+        thumb.className = 'thumb';
+        thumb.src = result.thumb;
+        row.prepend(thumb);
+        const found = row.querySelector('.found');
+        if (result.hadExif){
+          found.textContent = 'Metadata found and removed';
+        } else {
+          found.textContent = 'No metadata block found, re-encoded clean anyway';
+          found.classList.add('none');
+        }
+      } catch(err){
+        row.querySelector('.found').textContent = 'Could not process this file';
+      }
+    }
+    downloadBtn.disabled = cleaned.length === 0;
+  }
+
+  downloadBtn.addEventListener('click', async ()=>{
+    if (cleaned.length === 0) return;
+    if (cleaned.length === 1){
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(cleaned[0].blob);
+      a.download = 'clean-' + cleaned[0].name;
+      a.click();
+      return;
+    }
+    const zip = new JSZip();
+    cleaned.forEach(c => zip.file('clean-' + c.name, c.blob));
+    const content = await zip.generateAsync({type:'blob'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(content);
+    a.download = 'metawipex-clean-photos.zip';
+    a.click();
+  });
+})();
+</script>
+</body>
+</html>
